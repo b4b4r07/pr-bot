@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	"regexp"
-	"strings"
+	// "strings"
 
 	"github.com/google/go-github/github"
 	"github.com/nlopes/slack"
@@ -15,6 +15,11 @@ import (
 )
 
 const STATE_OPEN string = "#67C63D"
+
+type Object struct {
+	PullRequest github.PullRequest
+	Statuses    []*github.RepoStatus
+}
 
 var Params slack.PostMessageParameters = slack.PostMessageParameters{
 	Markdown:  true,
@@ -69,12 +74,23 @@ func run(api *slack.Client) int {
 							return 1
 						}
 					case "list":
-						issues, err := fetchIssuesFromGitHub(*user, *repo)
+						// issues, err := fetchIssuesFromGitHub(*user, *repo)
+						// if err != nil {
+						// 	log.Print(err)
+						// 	return 1
+						// }
+						// p := getPostMessageParameters(issues)
+						// _, _, err = api.PostMessage(ev.Channel, "", p)
+						// if err != nil {
+						// 	log.Print(err)
+						// 	return 1
+						// }
+						prs, err := fetchPullReq(*user, *repo)
 						if err != nil {
 							log.Print(err)
 							return 1
 						}
-						p := getPostMessageParameters(issues)
+						p := getPostMessageParameters(prs)
 						_, _, err = api.PostMessage(ev.Channel, "", p)
 						if err != nil {
 							log.Print(err)
@@ -104,29 +120,103 @@ func run(api *slack.Client) int {
 	}
 }
 
-func getPostMessageParameters(issues []github.Issue) slack.PostMessageParameters {
+// func getPostMessageParameters(prs []github.PullRequest) slack.PostMessageParameters {
+func getPostMessageParameters(prs []Object) slack.PostMessageParameters {
 	p := Params
 	p.Attachments = []slack.Attachment{}
-	for _, issue := range issues {
-		labels := []string{}
-		if issue.PullRequestLinks == nil {
-			continue
-		}
-		for _, label := range issue.Labels {
-			labels = append(labels, "`"+*label.Name+"`")
+	for _, pr := range prs {
+		// labels := []string{}
+		// for _, label := range issue.Labels {
+		// 	labels = append(labels, "`"+*label.Name+"`")
+		// }
+		// log.Print(pr.Head.SHA)
+		// for _, state := range pr.Statuses {
+		// 	// log.Printf("%#v\n", *state.ID)
+		// 	log.Print(*state.ID, *state.URL, *state.State, *state.Description)
+		// }
+		text := ""
+		log.Print(pr.Statuses)
+		if len(pr.Statuses) > 0 {
+			text = *pr.Statuses[0].State
 		}
 		p.Attachments = append(p.Attachments, slack.Attachment{
-			Fallback:   fmt.Sprintf("%d - %s", *issue.Number, *issue.Title),
-			Title:      fmt.Sprintf("<%s|#%d> %s", *issue.HTMLURL, *issue.Number, *issue.Title),
-			Text:       strings.Join(labels, ", "),
+			Fallback:   fmt.Sprintf("%d - %s", *pr.PullRequest.Number, *pr.PullRequest.Title),
+			Title:      fmt.Sprintf("<%s|#%d> %s", *pr.PullRequest.HTMLURL, *pr.PullRequest.Number, *pr.PullRequest.Title),
+			Text:       text,
 			MarkdownIn: []string{"title", "text", "fields", "fallback"},
 			Color:      STATE_OPEN,
-			AuthorIcon: *issue.User.AvatarURL,
-			AuthorName: "@" + *issue.User.Login,
-			AuthorLink: *issue.User.HTMLURL,
+			AuthorIcon: *pr.PullRequest.User.AvatarURL,
+			AuthorName: "@" + *pr.PullRequest.User.Login,
+			AuthorLink: *pr.PullRequest.User.HTMLURL,
 		})
 	}
 	return p
+}
+
+// func getPostMessageParameters(issues []github.Issue) slack.PostMessageParameters {
+// 	p := Params
+// 	p.Attachments = []slack.Attachment{}
+// 	for _, issue := range issues {
+// 		labels := []string{}
+// 		if issue.PullRequestLinks == nil {
+// 			continue
+// 		}
+// 		for _, label := range issue.Labels {
+// 			labels = append(labels, "`"+*label.Name+"`")
+// 		}
+// 		p.Attachments = append(p.Attachments, slack.Attachment{
+// 			Fallback:   fmt.Sprintf("%d - %s", *issue.Number, *issue.Title),
+// 			Title:      fmt.Sprintf("<%s|#%d> %s", *issue.HTMLURL, *issue.Number, *issue.Title),
+// 			Text:       strings.Join(labels, ", "),
+// 			MarkdownIn: []string{"title", "text", "fields", "fallback"},
+// 			Color:      STATE_OPEN,
+// 			AuthorIcon: *issue.User.AvatarURL,
+// 			AuthorName: "@" + *issue.User.Login,
+// 			AuthorLink: *issue.User.HTMLURL,
+// 		})
+// 	}
+// 	return p
+// }
+
+func fetchPullReq(user, repo string) ([]Object, error) {
+	if user == "" || repo == "" {
+		// return []github.PullRequest{}, errors.New("user/repo invalid format")
+		return []Object{}, errors.New("user/repo invalid format")
+	}
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: os.Getenv("GITHUB_ACCESS_TOKEN")},
+	)
+	tc := oauth2.NewClient(oauth2.NoContext, ts)
+	githubClient := github.NewClient(tc)
+
+	opt := &github.PullRequestListOptions{
+		State:       "open",
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	// var prs []github.PullRequest
+	var obj []Object
+	for {
+		repos, resp, err := githubClient.PullRequests.List(user, repo, opt)
+		if err != nil {
+			// return []github.PullRequest{}, err
+			return []Object{}, err
+		}
+		for _, v := range repos {
+			// prs = append(prs, *v)
+			repoStatuses, _, _ := githubClient.Repositories.ListStatuses(user, repo, *v.Head.SHA, nil)
+			obj = append(obj, Object{
+				PullRequest: *v,
+				Statuses:    repoStatuses,
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.ListOptions.Page = resp.NextPage
+	}
+	// return prs, nil
+	return obj, nil
 }
 
 func fetchIssuesFromGitHub(user, repo string) ([]github.Issue, error) {
